@@ -1,0 +1,158 @@
+//CODE
+
+import numpy as np
+import scipy.signal as signal
+import matplotlib.pyplot as plt
+import soundfile as sf
+import librosa
+from scipy.fft import fft, ifft
+def load_audio(file_path, sr=16000):
+    """Load audio file and resample to specified rate."""
+    audio, sr = librosa.load(file_path, sr=sr, mono=True)
+    if len(audio) < sr:
+        raise ValueError("Audio file too short (<1s).")
+    return audio, sr
+def estimate_noise_spectrum(noisy_audio, sr, frame_size=1024, hop_size=256, noise_duration=1.0):
+    """Estimate noise spectrum from the first noise_duration seconds of noisy audio."""
+    noise_samples = int(noise_duration * sr)
+    noise_segment = noisy_audio[:noise_samples]
+    n_frames = (len(noise_segment) - frame_size) // hop_size + 1
+    noise_spectrum = np.zeros(frame_size // 2 + 1, dtype=np.float64)
+    count = 0
+    for i in range(n_frames):
+        start = i * hop_size
+        frame = noise_segment[start:start + frame_size]
+        if len(frame) < frame_size:
+            frame = np.pad(frame, (0, frame_size - len(frame)), mode='constant')
+        frame_windowed = frame * np.hanning(frame_size)
+        spectrum = np.abs(fft(frame_windowed)[:frame_size // 2 + 1])
+        noise_spectrum += spectrum
+        count += 1
+    noise_spectrum = noise_spectrum / count if count > 0 else noise_spectrum
+    noise_spectrum = np.convolve(noise_spectrum, np.ones(5)/5, mode='same')  # Smoothing
+    return noise_spectrum
+def apply_noise_gate(audio, sr, threshold_factor=0.25):
+    """Apply noise gate with RMS-based threshold."""
+    window_size = int(0.02 * sr)
+    rms = np.sqrt(np.convolve(audio ** 2, np.ones(window_size)/window_size, mode='same'))
+    threshold = threshold_factor * np.median(rms)
+    audio = audio.copy()
+    audio[rms < threshold] = 0
+    return audio
+def band_pass_filter(audio, sr, lowcut=200, highcut=3000):
+    """Apply band-pass filter for speech frequencies."""
+    nyquist = sr / 2
+    low = lowcut / nyquist
+    high = highcut / nyquist
+    b, a = signal.butter(4, [low, high], btype='band')
+    return signal.filtfilt(b, a, audio)
+def spectral_subtraction(audio, noise_spectrum, sr, frame_size=1024, hop_size=256, alpha=2.2, beta=0.01):
+    """Apply spectral subtraction with noise gate and band-pass filter."""
+    window = np.hanning(frame_size)
+    n_frames = (len(audio) - frame_size) // hop_size + 1
+    output = np.zeros_like(audio)
+    overlap = np.zeros_like(audio)
+    dynamic_beta = beta * np.max(noise_spectrum)
+    for i in range(n_frames):
+        start = i * hop_size
+        frame = audio[start:start + frame_size]
+        if len(frame) < frame_size:
+            frame = np.pad(frame, (0, frame_size - len(frame)), mode='constant')
+        frame_windowed = frame * window
+        spectrum = fft(frame_windowed)
+        mag_spectrum = np.abs(spectrum[:frame_size // 2 + 1])
+        phase_spectrum = np.angle(spectrum[:frame_size // 2 + 1])
+        clean_mag = np.maximum(mag_spectrum - alpha * noise_spectrum, dynamic_beta)
+        clean_spectrum = np.zeros(frame_size, dtype=np.complex128)
+        clean_spectrum[:frame_size // 2 + 1] = clean_mag * np.exp(1j * phase_spectrum)
+        clean_spectrum[frame_size // 2 + 1:] = np.conj(clean_spectrum[frame_size // 2 - 1:0:-1])
+        clean_frame = np.real(ifft(clean_spectrum)) * window
+        output[start:start + frame_size] += clean_frame
+        overlap[start:start + frame_size] += window
+    output /= np.maximum(overlap, 1e-10)
+    output = apply_noise_gate(output, sr, threshold_factor=0.25)
+    output = band_pass_filter(output, sr, lowcut=200, highcut=3000)
+    max_original = np.max(np.abs(audio))
+    max_output = np.max(np.abs(output))
+    if max_output > 0:
+        output *= max_original / max_output
+    return output
+def compute_snr(clean_audio, noisy_audio, enhanced_audio):
+    """Compute SNR using clean audio as reference."""
+    noise_before = noisy_audio - clean_audio
+    noise_after = enhanced_audio - clean_audio
+    signal_power = np.mean(clean_audio ** 2)
+    noise_power_before = np.mean(noise_before ** 2)
+    noise_power_after = np.mean(noise_after ** 2)
+    snr_before = 10 * np.log10(signal_power / noise_power_before) if noise_power_before > 1e-10 else 0
+    snr_after = 10 * np.log10(signal_power / noise_power_after) if noise_power_after > 1e-10 else 0
+    return snr_before, snr_after
+
+def plot_waveform(noisy_audio, enhanced_audio, sr, filename='waveform_comparison.png'):
+    time = np.arange(len(noisy_audio)) / sr
+    plt.figure(figsize=(12, 6))
+    plt.subplot(2, 1, 1)
+    plt.plot(time, noisy_audio, label='Noisy Audio')
+    plt.title('Noisy Audio Waveform')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Amplitude')
+    plt.grid(True)
+    plt.legend()
+    plt.subplot(2, 1, 2)
+    plt.plot(time, enhanced_audio, label='Enhanced Audio', color='orange')
+    plt.title('Enhanced Audio Waveform')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Amplitude')
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.close()
+
+def plot_spectrogram(noisy_audio, enhanced_audio, sr, filename='spectrogram_comparison.png'):
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    spec, freqs, t, _ = plt.specgram(noisy_audio, Fs=sr, cmap='viridis', NFFT=1024)
+    plt.title('Noisy Audio Spectrogram')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Frequency (Hz)')
+    plt.colorbar(label='dB')
+    plt.subplot(1, 2, 2)
+    spec, freqs, t, _ = plt.specgram(enhanced_audio, Fs=sr, cmap='viridis', NFFT=1024)
+    plt.title('Enhanced Audio Spectrogram')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Frequency (Hz)')
+    plt.colorbar(label='dB')
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.close()
+def plot_snr_comparison(original_snr, enhanced_snr, filename='snr_comparison.png'):
+    plt.figure(figsize=(8, 6))
+    plt.bar(['Original', 'Enhanced'], [original_snr, enhanced_snr], color=['blue', 'orange'])
+    plt.title('SNR Comparison')
+    plt.ylabel('SNR (dB)')
+    plt.grid(True, axis='y')
+    plt.savefig(filename)
+    plt.close()
+
+def process_audio(noisy_file, clean_file, output_file, sr=16000):
+    """Process noisy audio, validate with clean audio, and generate plots."""
+    noisy_audio, sr = load_audio(noisy_file, sr)
+    clean_audio, _ = load_audio(clean_file, sr)
+    noise_spectrum = estimate_noise_spectrum(noisy_audio, sr, noise_duration=1.0)
+    enhanced_audio = spectral_subtraction(noisy_audio, noise_spectrum, sr)
+    original_snr, enhanced_snr = compute_snr(clean_audio, noisy_audio, enhanced_audio)
+    sf.write(output_file, enhanced_audio, sr)
+    plot_waveform(noisy_audio, enhanced_audio, sr)
+    plot_spectrogram(noisy_audio, enhanced_audio, sr)
+    plot_snr_comparison(original_snr, enhanced_snr)
+    return original_snr, enhanced_snr
+if _name_ == "_main_":
+    noisy_file = "noisy_speech.wav"
+    clean_file = "clean_speech.wav"
+    output_file = "enhanced_speech.wav"
+    original_snr, enhanced_snr = process_audio(noisy_file, clean_file, output_file)
+    print(f"Original SNR: {original_snr:.2f} dB, Enhanced SNR: {enhanced_snr:.2f} dB")
+
+
+
