@@ -1,10 +1,10 @@
 # Real-Time-Speech-Enhancement-System-Using-DSP-Techniques
 A high-performance Digital Signal Processing (DSP) solution designed to improve speech intelligibility by suppressing background noise in real-time audio streams.
 
-*Overview*
+**Overview*
 This project implements a robust speech enhancement pipeline in Python. It is engineered to handle diverse noise profiles by dynamically estimating the noise floor and performing precise spectral subtraction in the frequency domain.
 
-*Key Features*
+**Key Features*
 Spectral Subtraction: Core algorithm used to attenuate noise by subtracting the estimated noise power spectrum from the noisy speech spectrum.
 
 Automated Noise Gating: Effectively silences audio intervals where only noise is present, significantly improving overall clarity and perceived quality.
